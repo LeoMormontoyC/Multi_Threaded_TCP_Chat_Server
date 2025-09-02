@@ -1,0 +1,9 @@
+{"version": 2, "width": 156, "height": 41, "timestamp": 1753833840, "idle_time_limit": 5.0, "env": {"SHELL": "/usr/bin/zsh", "TERM": "xterm-256color"}}
+[0.492368, "o", "[oh-my-zsh] Would you like to update? [Y/n] "]
+[3.601997, "i", "y"]
+[3.602649, "o", "y"]
+[3.60291, "o", "\r\n"]
+[4.054668, "o", "\u001b[34mUpdating Oh My Zsh\u001b[0m\r\n"]
+[5.536365, "o", "\u001b[1;4mmaster\u001b[0m\r\n\r\n"]
+[5.536945, "o", "\u001b[1mFeatures:\u001b[0m\r\n\r\n"]
+[5.611419, "o", " - \u001b[33m537807c\u001b[0m [\u001b[38;5;9malias-finder\u001b[0m] Use ripgrep if possible (\u001b[32m#13043\u001b[0m)\r\n - \u001b[33mdf200c9\u001b[0m [\u001b[38;5;9mkeychain\u001b[0m]     Support >2.9 (\u001b[32m#13189\u001b[0m)\r\n - \u001b[33mff97957\u001b[0m [\u001b[38;5;9mtmux\u001b[0m]         Avoid autostart inside `\u001b[2mzed\u001b[0m` editor (\u001b[32m#13220\u001b[0m)\r\n - \u001b[33mdc3bbcd\u001b[0m [\u001b[38;5;9mweb-search\u001b[0m]   Add RubyGems.org (\u001b[32m#13210\u001b[0m)\r\n - \u001b[33m788b577\u001b[0m [\u001b[38;5;9mweb-search\u001b[0m]   Add search with `\u001b[2mclaude.ai\u001b[0m` and `\u001b[2mgrok.com\u001b[0m` (\u001b[32m#13222\u001b[0m)\r\n"]

@@ -1,0 +1,252 @@
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#define handle_error(msg)                                                      \
+  do {                                                                         \
+    perror(msg);                                                               \
+    exit(EXIT_FAILURE);                                                        \
+  } while (0)
+
+struct client {
+  int socketFd;
+  struct sockaddr_in addr;
+  bool active;
+  bool done;
+};
+
+struct clientInfo {
+  int socketFd;
+  struct sockaddr_in addr;
+  int index;
+};
+
+pthread_mutex_t clientsLock = PTHREAD_MUTEX_INITIALIZER;
+struct client *clients = NULL;
+int numberOfClients = 0;
+int doneCount = 0;
+int serverFd = -1;
+atomic_bool serverRunning = ATOMIC_VAR_INIT(true);
+
+char *findChar(char *buf, size_t len) {
+  for (size_t i = 0; i < len; i++)
+    if (buf[i] == '\n')
+      return &buf[i];
+
+  return NULL;
+}
+
+int writeAll(int fd, const uint8_t *buf, size_t len) {
+  size_t sent = 0;
+  while (sent < len) {
+    // buf + sent is start of msg + bytes alr sent
+    // len - sent are remaining bytes
+    ssize_t n = send(fd, buf + sent, len - sent, 0);
+
+    if (n > 0) {
+      sent += (size_t)n;
+      continue;
+    }
+
+    if (n == -1 && errno == EINTR)
+      continue;
+    return -1;
+  }
+  return 0;
+}
+
+void *threadAccept(void *arg) {
+  struct clientInfo *clientInfo = (struct clientInfo *)arg;
+  char buf[2048];
+  size_t used = 0;
+
+  while (1) {
+    ssize_t bytes = recv(clientInfo->socketFd, buf + used, sizeof(buf) - used, 0);
+    // type is 0 if its a reg message, 1 if end of exec
+
+    if (bytes <= 0) {
+      pthread_mutex_lock(&clientsLock);
+
+      clients[clientInfo->index].active = false;
+      close(clientInfo->socketFd);
+
+      pthread_mutex_unlock(&clientsLock);
+      free(clientInfo);
+      return NULL;
+    }
+    used += (size_t) bytes;
+    uint8_t type = (uint8_t)buf[0];
+
+    size_t start = 0;
+    while(1){
+    if (type == 0) {
+      char *msg = (char *)&buf[1];
+      char *newLine = findChar(msg, bytes - 1);
+
+      if (!newLine)
+        continue;
+
+      size_t msgLen = (size_t)(newLine - msg) + 1;
+
+      // have to create [type][ip][port][msg]
+      uint8_t output[1024];
+      output[0] = 0;
+
+      // IP
+      memcpy(output + 1, &clientInfo->addr.sin_addr.s_addr, 4);
+      // Port
+      memcpy(output + 5, &clientInfo->addr.sin_port, 2);
+      // Message
+      memcpy(output + 7, msg, msgLen);
+
+      // null terminate
+      output[7 + msgLen] = '\n';
+      size_t totalLen = 7 + msgLen + 1;
+
+      pthread_mutex_lock(&clientsLock);
+
+      for (int i = 0; i < numberOfClients; i++)
+        if (clients[i].active &&
+            writeAll(clients[i].socketFd, output, totalLen) == -1)
+          clients[i].active = false;
+      // send(clients[i].socketFd, output, totalLen, 0);
+
+      pthread_mutex_unlock(&clientsLock);
+      /*
+      if (clientFd < 0) {
+        perror("clientFd accept error");
+        exit(EXIT_FAILURE);
+      }
+      */
+    } else if (type == 1) {
+      pthread_mutex_lock(&clientsLock);
+
+      if (!clients[clientInfo->index].done) {
+        clients[clientInfo->index].done = true;
+        doneCount++;
+      }
+
+      if (doneCount == numberOfClients) {
+        uint8_t msg[2] = {1, '\n'};
+
+        for (int i = 0; i < numberOfClients; i++)
+          if (clients[i].active)
+            writeAll(clients[i].socketFd, msg, 2);
+        // send(clients[i].socketFd, msg, 1, 0);
+        atomic_store(&serverRunning, false);
+        close(serverFd);
+      }
+    }
+      pthread_mutex_unlock(&clientsLock);
+    }
+  }
+}
+int main(int argc, char *argv[]) {
+  signal(SIGPIPE, SIG_IGN);
+  if (argc != 3) {
+    fprintf(stderr, "Usage: %s <port> <#clients>\n", argv[0]);
+    return 1;
+  }
+
+  int port = atoi(argv[1]);
+  numberOfClients = atoi(argv[2]);
+
+  if (numberOfClients <= 0 || port <= 0)
+    handle_error("bad args");
+
+  // create/bind/listen
+  //  serverFd is global
+  serverFd = socket(AF_INET, SOCK_STREAM, 0);
+
+  if (serverFd == -1)
+    handle_error("socket error");
+
+  int yes = 1;
+  setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+  // fcntl(serverFd, F_SETFL, O_NONBLOCK);
+
+  struct sockaddr_in serverAddr = {0};
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_port = htons(port);
+  serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+  if (bind(serverFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1)
+    handle_error("bind");
+
+  if (listen(serverFd, numberOfClients) == -1)
+    handle_error("listen");
+
+  // array of clients
+  clients = calloc(numberOfClients, sizeof(struct client));
+
+  if (!clients)
+    handle_error("calloc");
+
+  int clientCount = 0;
+
+  while (atomic_load(&serverRunning)) {
+    struct sockaddr_in tempClient;
+    socklen_t addrLen = sizeof(tempClient);
+    int clientFd = accept(serverFd, (struct sockaddr *)&tempClient, &addrLen);
+
+    if (clientFd == -1) {
+      if (errno == EBADF)
+        break;
+      if (errno == EINTR)
+        continue;
+      continue;
+    }
+
+    pthread_mutex_lock(&clientsLock);
+
+    int slot = -1;
+
+    for (size_t i = 0; i < numberOfClients; i++) {
+      if (!clients[i].active) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot == -1) {
+      pthread_mutex_unlock(&clientsLock);
+      close(clientFd);
+      continue;
+    }
+    clients[slot].socketFd = clientFd;
+    clients[slot].addr = tempClient;
+    clients[slot].active = true;
+    clients[slot].done = false;
+
+    struct clientInfo *clientInfo = malloc(sizeof(struct clientInfo));
+    if (clientInfo == NULL) {
+      close(clientFd);
+      pthread_mutex_unlock(&clientsLock);
+      continue;
+    }
+
+    clientInfo->socketFd = clientFd;
+    clientInfo->addr = tempClient;
+    clientInfo->index = slot;
+
+    pthread_t clientThread;
+    pthread_create(&clientThread, NULL, threadAccept, clientInfo);
+    pthread_detach(clientThread);
+
+    pthread_mutex_unlock(&clientsLock);
+  }
+
+  free(clients);
+  return 0;
+}

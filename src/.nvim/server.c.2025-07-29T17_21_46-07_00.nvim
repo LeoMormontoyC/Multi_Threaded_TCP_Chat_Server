@@ -1,0 +1,59 @@
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+int main(int argc, char *argv[]) {
+  if (argc != 3)
+    return 1;
+
+  int port = atoi(argv[1]);
+  int numberOfClients = atoi(argv[2]);
+
+  if (numberOfClients <= 0 || port <= 0) {
+    // error handling
+    return 1;
+  }
+
+  int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+
+  if (serverFd < 0) {
+    perror("server socket error");
+    exit(EXIT_FAILURE);
+    // return 1;
+  }
+
+  struct sockaddr_in serverAddr;
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_port = htons(port);
+  serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+  if (bind(serverFd, (struct sockaddr_in *)&serverAddr, sizeof(serverAddr)) <
+      0) {
+    perror("Bind error");
+    exit(EXIT_FAILURE);
+  }
+
+  listen(serverFd, numberOfClients);
+  while (true) {
+    struct sockaddr_in clientAddr;
+    int clientFd = accept(serverFd, (struct sockaddr_in *)&clientAddr, sizeof(clientAddr));
+    if(clientFd < 0)
+    {
+      perror("clientFd accept error");
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  return 0;
+}
+
+
+
+

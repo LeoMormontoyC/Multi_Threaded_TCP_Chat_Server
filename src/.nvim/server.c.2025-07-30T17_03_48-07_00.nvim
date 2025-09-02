@@ -1,0 +1,121 @@
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+struct client {
+  int socketFd;
+  struct sockaddr_in addr;
+  bool active;
+  bool done;
+};
+
+struct clientInfo {
+  int socketFd;
+  struct sockaddr_in addr;
+  int index;
+};
+
+void *threadAccept(void *arg) {
+  struct clientInfo *clientInfo = (struct clientInfo *)arg;
+  char buf[1024];
+
+  while (recv(clientInfo->socketFd, buf, sizeof(buf), 0) > 0) {
+    uint8_t type = buf[0];
+    if (type == 0) {
+      char *msg = struct sockaddr_in clientAddr;
+      socklen_t addrLen = sizeof(clientAddr);
+      if (clientFd < 0) {
+        perror("clientFd accept error");
+        exit(EXIT_FAILURE);
+      }
+    }
+  }
+}
+int main(int argc, char *argv[]) {
+  if (argc != 3)
+    return 1;
+
+  int port = atoi(argv[1]);
+  int numberOfClients = atoi(argv[2]);
+
+  if (numberOfClients <= 0 || port <= 0) {
+    // error handling
+    return 1;
+  }
+
+  int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+
+  if (serverFd < 0) {
+    perror("server socket error");
+    exit(EXIT_FAILURE);
+    // return 1;
+  }
+
+  struct sockaddr_in serverAddr;
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_port = htons(port);
+  serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+  if (bind(serverFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+    perror("Bind error");
+    exit(EXIT_FAILURE);
+  }
+
+  listen(serverFd, numberOfClients);
+
+  struct client *clients = calloc(numberOfClients, sizeof(struct client));
+  if (!clients) {
+    perror("calloc");
+    exit(EXIT_FAILURE);
+  }
+  int doneCount = 0;
+  int clientCount = 0;
+  pthread_mutex_t clientsLock = PTHREAD_MUTEX_INITIALIZER;
+
+  while (true) {
+    struct sockaddr_in tempClient;
+    size_t addrLen = sizeof(tempClient);
+    int clientFd = accept(serverFd, (struct sockaddr *)&tempClient, &addrLen);
+
+    if (clientFd == -1)
+      // handle error
+      continue;
+
+    pthread_mutex_lock(&clientsLock);
+
+    int slot = -1;
+
+    for (size_t i = 0; i < numberOfClients; i++) {
+      if (clients[i].active == false) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot == -1)
+      pthread_mutex_unlock(&clientsLock);
+
+    clients[slot].socketFd = clientFd;
+    clients[slot].addr = tempClient;
+    clients[slot].active = true;
+    clients[slot].done = false;
+
+    struct clientInfo *clientInfo = malloc(sizeof(clientInfo *));
+    clientInfo->socketFd = clientFd;
+    clientInfo->addr = tempClient;
+    clientInfo->index = slot;
+
+    pthread_t clientThread;
+    pthread_create(&clientThread, NULL, threadAccept, clientInfo);
+    pthread_mutex_unlock(&clientsLock);
+  }
+
+  return 0;
+}

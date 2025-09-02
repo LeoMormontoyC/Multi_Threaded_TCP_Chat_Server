@@ -1,0 +1,57 @@
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+struct senderArgs {
+  int senderFd;
+  size_t msgsToSend;
+  atomic_bool *sendDone;
+};
+struct recieverArgs {
+  int recieverFd;
+  FILE *logFile;
+  atomic_bool *msgSeen;
+};
+
+int main(int argc, char *argv[]) {
+  // ip port, msg, log
+  char *ipString = argv[1];
+  uint16_t port = (uint16_t)atoi(argv[2]);
+  size_t numberOfMessages = (size_t)atoi(argv[3]);
+  char *logPath = argv[4];
+
+  // connect
+  int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+
+  struct sockaddr_in serverAddr;
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_port = htons(port);
+
+  inet_pton(AF_INET, ipString, &serverAddr.sin_addr);
+  connect(serverFd, (struct sockaddr *)&serverFd, sizeof(struct sockaddr_in));
+
+  // open log
+  FILE *logFile = fopen(logPath, "w");
+
+  struct senderArgs senderArgs;
+  senderArgs.senderFd = serverFd;
+
+  return 0;
+}
+
+
+
+
+
+

@@ -1,0 +1,144 @@
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+struct senderArgs {
+  int senderFd;
+  size_t msgsToSend;
+  atomic_bool *sendDone;
+};
+struct recieverArgs {
+  int recieverFd;
+  FILE *logFile;
+  atomic_bool *msgSeen;
+};
+
+atomic_bool sendDone = ATOMIC_VAR_INIT(false);
+atomic_bool msgSeen = ATOMIC_VAR_INIT(false);
+
+void* sendMsgThread(void* arg){
+  struct senderArgs* senderArgs = (struct senderArgs*) arg;
+  uint8_t byteBuf[1024];
+
+  for(size_t i = 0; i < senderArgs->msgsToSend; i++){
+    uint8_t random[32];
+    char msg[65];
+    getentropy(random, sizeof(random));
+    bytesToChar();
+    
+    size_t msgLen = strlen(msg);
+
+    byteBuf[0] = 0;
+    memcpy(byteBuf + 1, msg, msgLen);
+    byteBuf[1 + msgLen] = '\n';
+    writeAll(senderArgs.senderFd, msg, 1 + msgLen + 1);
+  }
+
+  const uint8_t doneMsg[2] = {1, '\n'};
+  writeAll(senderArgs.senderFd, doneMsg, 2);
+
+  atomic_store(senderArgs->sendDone, true);
+  return NULL;
+}
+
+void* recieveMsgThread(void* arg){
+  struct recieverArgs* recieverArgs = (struct recieverArgs*) arg;
+  char buffer[2048];
+  size_t used = 0;
+  while(1)
+  {
+    ssize_t bytes = recv(recieverArgs.recieverFd, sizeof buffer - used, 0);
+    if(bytes == -1)
+      break;
+    used += (size_t)bytes;
+
+    size_t start = 0;
+    while(1)
+    {
+      char* newLine = memchr(buffer + start, '\n', used - start);
+      if (!newLine)
+        break;
+
+      //msgs 
+      size_t msgLen = (size_t)(newLine - (buffer + start)) + 1;
+      uint8_t type = (uint8_t)buffer[start];
+      
+      if(type == 0 && msgLen >= 7)
+      {
+        uint32_t netIp;
+        memcpy(&netIp, buffer + start + 1, 4);
+
+        uint16_t netPort;
+        memcpy(&netPort, buffer + start + 5, 2);
+      
+        //coded ip to str form
+        char ipStr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &netIp, ipStr, sizeof ipStr);
+
+        uint16_t port = ntohs(netPort);
+
+        char msg[1024];
+        memcpy(msg, buffer + start + 7, msgLen - 7);
+        msg[msgLen - 7];
+
+        fprintf(recieverArgs->logFile, "s%", ipStr, port, msg);
+      }
+    }
+  }
+}
+
+int main(int argc, char *argv[]) {
+  // ip port, msg, log
+  char *ipString = argv[1];
+  uint16_t port = (uint16_t)atoi(argv[2]);
+  size_t numberOfMessages = (size_t)atoi(argv[3]);
+  char *logPath = argv[4];
+
+  // connect
+  int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+
+  struct sockaddr_in serverAddr;
+  serverAddr.sin_family = AF_INET;
+  serverAddr.sin_port = htons(port);
+
+  inet_pton(AF_INET, ipString, &serverAddr.sin_addr);
+  connect(serverFd, (struct sockaddr *)&serverFd, sizeof(struct sockaddr_in));
+
+  // open log
+  FILE *logFile = fopen(logPath, "w");
+
+  struct senderArgs senderArgs;
+  senderArgs.senderFd = serverFd;
+  senderArgs.msgsToSend = numberOfMessages;
+  senderArgs.sendDone = &sendDone;
+
+  struct recieverArgs recieverArgs;
+  recieverArgs.recieverFd = serverFd;
+  recieverArgs.logFile = logFile;
+  recieverArgs.msgSeen = &msgSeen;
+
+  pthread_t senderThread;
+  pthread_create(&senderThread, NULL, sendMsgThread, &senderArgs);
+
+  pthread_t recieverThread;
+  pthread_create(&recieverThread, NULL, recieveMsgThread, &recieverArgs);
+
+  pthread_join(senderThread, NULL);
+  pthread_join(recieverThread, NULL);
+
+  close(serverFd);
+  fclose(logPath);
+
+  return 0;
+}
