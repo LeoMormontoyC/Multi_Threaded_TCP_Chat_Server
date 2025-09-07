@@ -63,43 +63,53 @@ int bytesToChar(uint8_t *buf, ssize_t buf_size, char *str, ssize_t str_size) {
 }
 
 void *sendMsgThread(void *arg) {
+  //Threads accept a single void* argument, so we typecast it to the senderArgs struct
   struct senderArgs *senderArgs = (struct senderArgs *)arg;
-  uint8_t byteBuf[1024];
+  uint8_t byteBuf[1024]; //for the getentropy random msg
 
+  //Send specified number of random messages
   for (size_t i = 0; i < senderArgs->msgsToSend; i++) {
     uint8_t random[32];
     char msg[65];
     getentropy(random, sizeof(random));
+    //getentropy fills random with random bytes
+    //Convert to hex string
     bytesToChar(random, sizeof(random), msg, sizeof(msg));
 
     size_t msgLen = strlen(msg);
 
+    //Send as [type][msg]\n
+    // type 0 for normal msg
     byteBuf[0] = 0;
     memcpy(byteBuf + 1, msg, msgLen);
     byteBuf[1 + msgLen] = '\n';
     writeAll(senderArgs->senderFd, byteBuf, 1 + msgLen + 1);
   }
-
+  //Send done message [type=1][]'\n'] to indicate all msgs sent
   const uint8_t doneMsg[2] = {1, '\n'};
   writeAll(senderArgs->senderFd, doneMsg, 2);
 
+  //Thread is done sending msgs so we set the atomic bool to true
+  //  we use atomic bools to safely share state between threads
   atomic_store(senderArgs->sendDone, true);
   return NULL;
 }
 
 void *receiveMsgThread(void *arg) {
+  //Threads accept a single void* argument, so we typecast it to the receiverArgs struct
   struct receiverArgs *receiverArgs = (struct receiverArgs *)arg;
   char buffer[2048];
   size_t used = 0;
   while (1) {
-    ssize_t bytes =
-        recv(receiverArgs->receiverFd, buffer + used, sizeof buffer - used, 0);
+    // recv data sent from server
+    ssize_t bytes = recv(receiverArgs->receiverFd, buffer + used, sizeof buffer - used, 0);
     if (bytes == -1)
       break;
     used += (size_t)bytes;
 
     size_t start = 0;
     while (1) {
+      // look for newline to find end of msg
       char *newLine = memchr(buffer + start, '\n', used - start);
       if (!newLine)
         break;
@@ -121,12 +131,14 @@ void *receiveMsgThread(void *arg) {
 
         uint16_t port = ntohs(netPort);
 
+        //type (1) + ip(4) + port(2) + msg(n) + '\n'(1) = 8
         size_t retLoad = msgLen - 8;
         char msg[1024];
         memcpy(msg, buffer + start + 7, retLoad);
         msg[retLoad] = '\0';
 
         printf("%-15s%-10u%s\n", ipStr, port, msg);
+        //for the log file
         fprintf(receiverArgs->logFile, "%-15s%-10u%s\n", ipStr, port, msg);
         fflush(receiverArgs->logFile);
       } else if (type == 1) {
@@ -144,6 +156,8 @@ void *receiveMsgThread(void *arg) {
 }
 
 int main(int argc, char *argv[]) {
+  // Ignore SIGPIPE to prevent the client from terminating if the server closes the connection.
+  // so we can handle it and treat as a client disconnect
   signal(SIGPIPE, SIG_IGN);
   if (argc != 5) {
     fprintf(stderr, "Usage: %s <IP> <port> <#msg> <logfile>\n", argv[0]);
@@ -156,7 +170,8 @@ int main(int argc, char *argv[]) {
   size_t numberOfMessages = (size_t)atoi(argv[3]);
   char *logPath = argv[4];
 
-  // connect
+  // CONNECT
+  // Create a TCP socket for connecting to the server (IPv4, stream-oriented (2-way))
   int serverFd = socket(AF_INET, SOCK_STREAM, 0);
   if (serverFd == -1)
     handle_error("socket");
@@ -168,11 +183,11 @@ int main(int argc, char *argv[]) {
   if (inet_pton(AF_INET, ipString, &serverAddr.sin_addr) != 1)
     handle_error("bad ip");
 
-  if (connect(serverFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) ==
-      -1)
-    handle_error("connect");
+  // Connect to server
+  if (connect(serverFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1)
+    handle_error("connect to server");
 
-  // open log
+  // open log to store received msgs
   FILE *logFile = fopen(logPath, "w");
   if (logFile == NULL) {
     perror("fopen");
@@ -180,11 +195,15 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  // Start sender and receiver threads
+  // Created custom structs to pass multiple args to the threads depending on their purpose
+  //  Sender sends msgs then a done msg
   struct senderArgs senderArgs;
   senderArgs.senderFd = serverFd;
   senderArgs.msgsToSend = numberOfMessages;
   senderArgs.sendDone = &sendDone;
 
+  //  Receiver prints msgs to stdout and log file
   struct receiverArgs receiverArgs;
   receiverArgs.receiverFd = serverFd;
   receiverArgs.logFile = logFile;

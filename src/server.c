@@ -68,6 +68,7 @@ int writeAll(int fd, const uint8_t *buf, size_t len) {
 }
 
 void *threadAccept(void *arg) {
+  //Threads accept a single void* argument, so we typecast it to the clientInfo struct
   struct clientInfo *clientInfo = (struct clientInfo *)arg;
   char buf[2048];
   size_t used = 0;
@@ -75,9 +76,10 @@ void *threadAccept(void *arg) {
   while (1) {
     ssize_t bytes =
         recv(clientInfo->socketFd, buf + used, sizeof(buf) - used, 0);
-    // type is 0 if its a reg message, 1 if end of exec
+    // type is 0 if its a regular message, 1 if end of client execution
 
     if (bytes <= 0) {
+      // mark client as inactive and close its socket locked to avoid race conditions
       pthread_mutex_lock(&clientsLock);
 
       clients[clientInfo->index].active = false;
@@ -99,16 +101,15 @@ void *threadAccept(void *arg) {
       uint8_t type = buf[start];
 
       if (type == 0) {
-        // char *msg = (char *)&buf[1];
+        // look for newline to find end of msg
         char *newLine = memchr(buf + start + 1, '\n', used - start - 1);
 
         if (!newLine)
           break;
-
-        size_t msgLen =
-            (size_t)((char *)newLine - (char *)(buf + start + 1)) + 1;
+        
+          // 1 for type + msgLen for msg + \n
+        size_t msgLen = (size_t)((char *)newLine - (char *)(buf + start + 1)) + 1;
         size_t consBytes = 1 + msgLen;
-        // have to create [type][ip][port][msg]
         uint8_t output[1024];
         output[0] = 0;
 
@@ -121,22 +122,17 @@ void *threadAccept(void *arg) {
 
         size_t totalLen = 7 + msgLen;
 
+        // send to all active clients
         pthread_mutex_lock(&clientsLock);
 
         for (int i = 0; i < numberOfClients; i++)
           if (clients[i].active &&
               writeAll(clients[i].socketFd, output, totalLen) == -1)
             clients[i].active = false;
-        // send(clients[i].socketFd, output, totalLen, 0);
 
         pthread_mutex_unlock(&clientsLock);
         start += consBytes;
-        /*
-        if (clientFd < 0) {
-          perror("clientFd accept error");
-          exit(EXIT_FAILURE);
-        }
-        */
+
       } else if (type == 1) {
         if (used - start < 2)
           break;
@@ -148,13 +144,14 @@ void *threadAccept(void *arg) {
           doneCount++;
         }
 
+        // if all clients done, notify all and shutdown server
         if (doneCount == numberOfClients) {
           uint8_t msg[2] = {1, '\n'};
 
+          // notify all clients
           for (int i = 0; i < numberOfClients; i++)
             if (clients[i].active)
               writeAll(clients[i].socketFd, msg, 2);
-          // send(clients[i].socketFd, msg, 1, 0);
           atomic_store(&serverRunning, false);
           close(serverFd);
         }
@@ -165,6 +162,7 @@ void *threadAccept(void *arg) {
         break;
       }
     }
+    // remove used bytes from buffer
     if (start) {
       memmove(buf, buf + start, used - start);
       used -= start;
@@ -172,6 +170,8 @@ void *threadAccept(void *arg) {
   }
 }
 int main(int argc, char *argv[]) {
+  // Ignore SIGPIPE to prevent the server from terminating if a client closes the connection.
+  // so we can handle it and treat as a client disconnect
   signal(SIGPIPE, SIG_IGN);
   if (argc != 3) {
     fprintf(stderr, "Usage: %s <port> <#clients>\n", argv[0]);
@@ -185,28 +185,31 @@ int main(int argc, char *argv[]) {
     handle_error("bad args");
 
   // create/bind/listen
-  //  serverFd is global
+  //  serverFd is global to be used in threadAccept to close when all clients done
+  //  and in main to close on error
   serverFd = socket(AF_INET, SOCK_STREAM, 0);
 
   if (serverFd == -1)
     handle_error("socket error");
 
   int yes = 1;
+  // allow reuse of local addresses (port) without waiting for timeout
   setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
-  // fcntl(serverFd, F_SETFL, O_NONBLOCK);
 
   struct sockaddr_in serverAddr = {0};
   serverAddr.sin_family = AF_INET;
   serverAddr.sin_port = htons(port);
   serverAddr.sin_addr.s_addr = INADDR_ANY;
 
+  // bind to all interfaces on port
   if (bind(serverFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1)
     handle_error("bind");
 
+    // listen for connections with a backlog of numberOfClients
   if (listen(serverFd, numberOfClients) == -1)
     handle_error("listen");
 
-  // array of clients
+  // array of clients to keep track of active connections
   clients = calloc(numberOfClients, sizeof(struct client));
 
   if (!clients)
@@ -214,9 +217,11 @@ int main(int argc, char *argv[]) {
 
   int clientCount = 0;
 
+  // Accept clients until we reach max clients or an error occurs
   while (atomic_load(&serverRunning)) {
     struct sockaddr_in tempClient;
     socklen_t addrLen = sizeof(tempClient);
+    // accept a new client connection
     int clientFd = accept(serverFd, (struct sockaddr *)&tempClient, &addrLen);
 
     if (clientFd == -1) {
@@ -227,10 +232,12 @@ int main(int argc, char *argv[]) {
       continue;
     }
 
+    // add client to array and create thread to handle it avoid blocking main thread
     pthread_mutex_lock(&clientsLock);
 
     int slot = -1;
 
+    // find first available slot
     for (size_t i = 0; i < numberOfClients; i++) {
       if (!clients[i].active) {
         slot = i;
@@ -242,11 +249,14 @@ int main(int argc, char *argv[]) {
       close(clientFd);
       continue;
     }
+    // add client data to client at slot
     clients[slot].socketFd = clientFd;
     clients[slot].addr = tempClient;
     clients[slot].active = true;
     clients[slot].done = false;
 
+    // allocates memory to store data for the new client
+    // use clientInfo struct to pass to threadAccept client arguments
     struct clientInfo *clientInfo = malloc(sizeof(struct clientInfo));
     if (clientInfo == NULL) {
       close(clientFd);
@@ -259,6 +269,7 @@ int main(int argc, char *argv[]) {
     clientInfo->index = slot;
 
     pthread_t clientThread;
+    // create detached thread to handle client so we don't have to join it later
     pthread_create(&clientThread, NULL, threadAccept, clientInfo);
     pthread_detach(clientThread);
 
