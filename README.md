@@ -15,6 +15,13 @@ Originally built as part of a **Systems Programming course project** at Simon Fr
 - **Scalable testing** — validated with 100+ clients and hundreds of messages per client.  
 
 ---
+## ⚙️ Requirements
+
+- **Operating System:** Linux (tested on Ubuntu/Docker and WSL).  
+  *Note: This project uses POSIX threads and sockets, so it is not portable to Windows without major changes.*  
+- **Compiler:** clang (tested with clang 14+).  
+- **Build tools:** cmake, make.  
+---
 
 ## 🖥️ Usage
 
@@ -49,7 +56,7 @@ make
   ```bash
   ./client 127.0.0.1 8000 10 client0.log
   ```
-
+---
 ## ✅ Testing
 
 This project was validated using the official course-provided test harness (`server-tester` and `client-tester`).  
@@ -64,3 +71,4 @@ The tests covered:
 In addition, manual testing can be performed with:
 ```bash
 telnet 127.0.0.1 8000
+
